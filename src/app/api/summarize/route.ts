@@ -68,26 +68,39 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Invalid YouTube URL. Please provide a valid link.' }, { status: 400 });
     }
 
-    // Fetch video metadata and transcript in parallel
-    const [metadata, transcriptResult] = await Promise.allSettled([
-      getVideoMetadata(videoId),
-      YoutubeTranscript.fetchTranscript(videoId),
-    ]);
+    // Fetch video metadata and transcript
+    const metadata = await getVideoMetadata(videoId);
+    const videoMeta = metadata;
 
-    const videoMeta = metadata.status === 'fulfilled' ? metadata.value : {
-      title: 'YouTube Video',
-      author: 'Unknown Channel',
-      thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
-    };
+    let transcriptItems = null;
+    let transcriptError = null;
 
-    if (transcriptResult.status === 'rejected') {
+    try {
+      // Attempt 1: Default language
+      transcriptItems = await YoutubeTranscript.fetchTranscript(videoId);
+    } catch (e: any) {
+      console.warn(`Default transcript fetch failed for ${videoId}:`, e.message);
+      
+      try {
+        // Attempt 2: Try English explicitly
+        transcriptItems = await YoutubeTranscript.fetchTranscript(videoId, { lang: 'en' });
+      } catch (e2: any) {
+        try {
+          // Attempt 3: Try Hindi explicitly (common for user's context)
+          transcriptItems = await YoutubeTranscript.fetchTranscript(videoId, { lang: 'hi' });
+        } catch (e3: any) {
+          transcriptError = e3.message;
+          console.error(`All transcript attempts failed for ${videoId}:`, e3.message);
+        }
+      }
+    }
+
+    if (!transcriptItems || transcriptItems.length === 0) {
       return NextResponse.json({
-        error: 'Could not fetch transcript for this video. Make sure the video has captions/subtitles enabled.',
+        error: `Could not fetch transcript: ${transcriptError || 'No captions found'}. This video might not have subtitles enabled or YouTube is blocking the request.`,
         videoMeta,
       }, { status: 400 });
     }
-
-    const transcriptItems = transcriptResult.value;
 
     if (!transcriptItems || transcriptItems.length === 0) {
       return NextResponse.json({ error: 'No transcript available for this video.', videoMeta }, { status: 400 });
