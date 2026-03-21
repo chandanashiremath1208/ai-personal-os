@@ -54,6 +54,67 @@ export default function SummarizerPage() {
     if (user) localStorage.setItem(`yt-history-${user.id}`, JSON.stringify(items.slice(0, 20)))
   }
 
+  const extractVideoId = (url: string) => {
+    const patterns = [
+      /(?:youtube\.com\/watch\?v=)([a-zA-Z0-9_-]{11})/,
+      /(?:youtu\.be\/)([a-zA-Z0-9_-]{11})/,
+      /(?:youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/,
+      /(?:youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
+    ]
+    for (const pattern of patterns) {
+      const match = url.match(pattern)
+      if (match) return match[1]
+    }
+    return null
+  }
+
+  const fetchTranscriptClientSide = async (videoId: string) => {
+    try {
+      // Step 1: Fetch the YouTube page via CORS proxy
+      const pageUrl = encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)
+      const proxyUrl = `https://api.allorigins.win/get?url=${pageUrl}`
+      const response = await fetch(proxyUrl)
+      const data = await response.json()
+      const html = data.contents
+
+      // Step 2: Extract caption tracks
+      const playerResponseMatch = html.match(/ytInitialPlayerResponse\s*=\s*({.+?});/)
+      if (!playerResponseMatch) return null
+
+      const playerResponse = JSON.parse(playerResponseMatch[1])
+      const tracks = playerResponse.captions?.playerCaptionsTracklistRenderer?.captionTracks
+      if (!tracks || tracks.length === 0) return null
+
+      // Step 3: Fetch the transcript XML via CORS proxy
+      const track = tracks.find((t: any) => t.languageCode === 'en' && !t.kind) || 
+                    tracks.find((t: any) => t.languageCode === 'en') || 
+                    tracks[0]
+      
+      const transcriptProxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(track.baseUrl)}`
+      const transcriptRes = await fetch(transcriptProxyUrl)
+      const transcriptData = await transcriptRes.json()
+      const transcriptXml = transcriptData.contents
+
+      // Step 4: Parse XML
+      const textMatches = transcriptXml.matchAll(/<text[^>]*>([^<]*)<\/text>/g)
+      const lines = []
+      for (const match of textMatches) {
+        lines.push(match[1]
+          .replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>')
+          .replace(/&#39;/g, "'")
+          .replace(/&quot;/g, '"')
+          .replace(/\n/g, ' ')
+        )
+      }
+      return lines.join(' ').replace(/\s+/g, ' ').trim()
+    } catch (e) {
+      console.error('Client-side transcript fetch failed:', e)
+      return null
+    }
+  }
+
   const handleSummarize = async (e: React.FormEvent) => {
     e.preventDefault()
     setSummarizing(true)
@@ -62,12 +123,33 @@ export default function SummarizerPage() {
     setVideoMeta(null)
 
     try {
-      const res = await fetch('/api/summarize', {
+      // Attempt 1: Normal server-side fetch
+      let res = await fetch('/api/summarize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url }),
       })
-      const data = await res.json()
+      
+      let data = await res.json()
+
+      // Attempt 2: If server is blocked, try client-side fetch + CORS proxy
+      if (!res.ok && data.error?.includes('blocking')) {
+        const videoId = extractVideoId(url)
+        if (videoId) {
+          console.log('Server blocked. Trying client-side fallback...')
+          const clientTranscript = await fetchTranscriptClientSide(videoId)
+          if (clientTranscript) {
+            console.log('Client-side transcript fetched! Re-summarizing...')
+            res = await fetch('/api/summarize', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ url, transcript: clientTranscript }),
+            })
+            data = await res.json()
+          }
+        }
+      }
+
       if (data.videoMeta) setVideoMeta(data.videoMeta)
       if (!res.ok) {
         setError(data.error || 'Something went wrong.')

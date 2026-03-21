@@ -53,7 +53,7 @@ export async function POST(req: Request) {
 
   try {
     const body = await req.json();
-    const { url } = body;
+    const { url, transcript: providedTranscript } = body;
 
     if (!url) {
       return NextResponse.json({ error: 'Please provide a YouTube URL.' }, { status: 400 });
@@ -68,15 +68,17 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Invalid YouTube URL. Please provide a valid link.' }, { status: 400 });
     }
 
-    // Fetch video metadata and transcript
+    // Fetch video metadata
     const metadata = await getVideoMetadata(videoId);
     const videoMeta = metadata;
 
-    let transcriptText = '';
+    let transcriptText = providedTranscript || '';
     let transcriptError = null;
 
-    // --- ADVANCED TRANSCRIPT FETCHING LOGIC (ROUND 2) ---
-    try {
+    if (!transcriptText) {
+      // --- ADVANCED TRANSCRIPT FETCHING LOGIC (ROUND 2) ---
+      try {
+        // ... existing logic ...
       // Method 1: Mimic a very specific modern browser session
       const userAgents = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
@@ -160,6 +162,7 @@ export async function POST(req: Request) {
       transcriptError = e.message;
       console.error('All transcript fetch methods failed:', transcriptError);
     }
+    } // This closes the 'if (!transcriptText)' block
 
     if (!transcriptText || transcriptText.trim().length === 0) {
       return NextResponse.json({
