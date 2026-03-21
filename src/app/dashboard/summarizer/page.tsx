@@ -69,31 +69,44 @@ export default function SummarizerPage() {
   }
 
   const fetchTranscriptClientSide = async (videoId: string) => {
-    // Try multiple CORS proxies for maximum reliability - expanded to 3
+    // Round 5: Multi-Relay Strategy
+    // Try a dedicated REST API first (highest reliability for transcripts)
+    try {
+      console.log(`[Summarizer] Attempting dedicated Transcript API for: ${videoId}`)
+      const res = await fetch(`https://yt-transcript-api.vercel.app/api/transcript?videoId=${videoId}`)
+      if (res.ok) {
+        const data = await res.json()
+        if (data && data.transcript) {
+          console.log('[Summarizer] Success! Transcript fetched via dedicated API.')
+          return data.transcript.map((t: any) => t.text).join(' ')
+        }
+      }
+    } catch (e) { console.warn('[Summarizer] Dedicated API failed.') }
+
+    // Backup proxies - using different strategies
     const proxies = [
-      (url: string) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
+      // Strategy 1: AllOrigins RAW (more reliable than JSON wrapper)
+      (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+      // Strategy 2: CorsProxy.io
       (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+      // Strategy 3: ThingProxy
+      (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`,
+      // Strategy 4: CodeTabs
       (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`
     ]
 
     for (const getProxyUrl of proxies) {
       try {
-        console.log(`[Summarizer] Trying proxy: ${getProxyUrl('YouTube-Page')}`)
+        console.log(`[Summarizer] Trying proxy strategy: ${getProxyUrl('YouTube-URL')}`)
         const response = await fetch(getProxyUrl(`https://www.youtube.com/watch?v=${videoId}`))
-        const data = await response.json().catch(() => ({ contents: null }))
+        if (!response.ok) continue
         
-        // Some proxies return text/json directly, others wrap in .contents
-        const html = typeof data === 'string' ? data : (data.contents || data.result || null)
+        const html = await response.text()
+        if (!html || html.length < 500) continue
 
-        if (!html || typeof html !== 'string' || html.length < 1000) {
-          console.warn('[Summarizer] Proxy returned invalid or too short HTML.')
-          continue
-        }
-
-        // Ultra-forgiving search for player response or initial data
-        // Matches { ... } following the assignment, stopping at semicolon, newline, or next script tag
-        const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*({[\s\S]+?})(?:\s*;|\s*\n|\s*<script)/ )
-        const dataMatch = html.match(/ytInitialData\s*=\s*({[\s\S]+?})(?:\s*;|\s*\n|\s*<script)/ )
+        // Extract player data
+        const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*({[\s\S]+?})(?:\s*;|\s*\n|\s*<script)/)
+        const dataMatch = html.match(/ytInitialData\s*=\s*({[\s\S]+?})(?:\s*;|\s*\n|\s*<script)/)
         
         let playerResponse = null
         try {
@@ -102,28 +115,22 @@ export default function SummarizerPage() {
             const initialData = JSON.parse(dataMatch[1])
             playerResponse = initialData.playerResponse || initialData
           }
-        } catch (e) { 
-          console.error('[Summarizer] JSON parse failed for player data on this proxy.', e)
-          continue 
-        }
+        } catch (e) { continue }
 
         const captionTracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks || 
                             playerResponse?.playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks
 
         if (captionTracks && captionTracks.length > 0) {
-          console.log(`[Summarizer] Found ${captionTracks.length} caption tracks. Fetching XML...`)
           const track = captionTracks.find((t: any) => t.languageCode === 'en' && !t.kind) || 
                         captionTracks.find((t: any) => t.languageCode === 'en') || 
                         captionTracks[0]
           
+          console.log(`[Summarizer] Found captions. Fetching XML via proxy...`)
           const transcriptRes = await fetch(getProxyUrl(track.baseUrl))
-          const transcriptData = await transcriptRes.json().catch(() => null)
-          const transcriptXml = typeof transcriptData === 'string' ? transcriptData : (transcriptData?.contents || transcriptData?.result || null)
+          if (!transcriptRes.ok) continue
 
-          if (!transcriptXml || typeof transcriptXml !== 'string') {
-            console.warn('[Summarizer] Failed to fetch transcript XML from this proxy.')
-            continue
-          }
+          const transcriptXml = await transcriptRes.text()
+          if (!transcriptXml || !transcriptXml.includes('<text')) continue
 
           const textMatches = transcriptXml.matchAll(/<text[^>]*>([^<]*)<\/text>/g)
           const lines = []
@@ -138,15 +145,13 @@ export default function SummarizerPage() {
             )
           }
           const text = lines.join(' ').replace(/\s+/g, ' ').trim()
-          if (text && text.length > 10) {
-            console.log('[Summarizer] Success! Transcript extracted via browser-side proxy.')
+          if (text && text.length > 20) {
+            console.log('[Summarizer] Success! Transcript extracted via proxy relay.')
             return text
           }
-        } else {
-          console.warn('[Summarizer] No caption tracks found in player response via this proxy.')
         }
       } catch (e) {
-        console.warn('[Summarizer] Proxy attempt failed, trying next...', e)
+        console.warn('[Summarizer] Proxy attempt failed.', e)
       }
     }
     return null
