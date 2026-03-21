@@ -68,43 +68,31 @@ export default function SummarizerPage() {
     return null
   }
 
-  const fetchTranscriptClientSide = async (videoId: string) => {
-    // Round 5: Multi-Relay Strategy
-    // Try a dedicated REST API first (highest reliability for transcripts)
-    try {
-      console.log(`[Summarizer] Attempting dedicated Transcript API for: ${videoId}`)
-      const res = await fetch(`https://yt-transcript-api.vercel.app/api/transcript?videoId=${videoId}`)
-      if (res.ok) {
-        const data = await res.json()
-        if (data && data.transcript) {
-          console.log('[Summarizer] Success! Transcript fetched via dedicated API.')
-          return data.transcript.map((t: any) => t.text).join(' ')
-        }
-      }
-    } catch (e) { console.warn('[Summarizer] Dedicated API failed.') }
+  const [manualTranscript, setManualTranscript] = useState('')
+  const [showManualInput, setShowManualInput] = useState(false)
 
-    // Backup proxies - using different strategies
+  const fetchTranscriptClientSide = async (videoId: string) => {
+    // Round 6: Using the Google-owned internal proxy (Gadget Proxy)
+    // This is virtually unblockable by YouTube as it comes from Google's own IPs.
+    const googleProxy = (url: string) => `https://images${~~(Math.random()*3333)}-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&url=${encodeURIComponent(url)}`
+    
+    // Other fallbacks
     const proxies = [
-      // Strategy 1: AllOrigins RAW (more reliable than JSON wrapper)
+      googleProxy,
       (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-      // Strategy 2: CorsProxy.io
       (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-      // Strategy 3: ThingProxy
-      (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`,
-      // Strategy 4: CodeTabs
-      (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`
     ]
 
     for (const getProxyUrl of proxies) {
       try {
-        console.log(`[Summarizer] Trying proxy strategy: ${getProxyUrl('YouTube-URL')}`)
+        console.log(`[Summarizer] Attempting proxy: ${getProxyUrl('YouTube-Page')}`)
         const response = await fetch(getProxyUrl(`https://www.youtube.com/watch?v=${videoId}`))
         if (!response.ok) continue
         
         const html = await response.text()
         if (!html || html.length < 500) continue
 
-        // Extract player data
+        // Extract player data with extremely permissive regex
         const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*({[\s\S]+?})(?:\s*;|\s*\n|\s*<script)/)
         const dataMatch = html.match(/ytInitialData\s*=\s*({[\s\S]+?})(?:\s*;|\s*\n|\s*<script)/)
         
@@ -125,7 +113,7 @@ export default function SummarizerPage() {
                         captionTracks.find((t: any) => t.languageCode === 'en') || 
                         captionTracks[0]
           
-          console.log(`[Summarizer] Found captions. Fetching XML via proxy...`)
+          console.log(`[Summarizer] Success! Found captions via proxy. Fetching XML...`)
           const transcriptRes = await fetch(getProxyUrl(track.baseUrl))
           if (!transcriptRes.ok) continue
 
@@ -146,7 +134,7 @@ export default function SummarizerPage() {
           }
           const text = lines.join(' ').replace(/\s+/g, ' ').trim()
           if (text && text.length > 20) {
-            console.log('[Summarizer] Success! Transcript extracted via proxy relay.')
+            console.log('[Summarizer] Success! Transcript extracted via Google Proxy.')
             return text
           }
         }
@@ -157,14 +145,37 @@ export default function SummarizerPage() {
     return null
   }
 
-  const handleSummarize = async (e: React.FormEvent) => {
-    e.preventDefault()
+  const handleSummarize = async (e?: React.FormEvent, providedTranscript?: string) => {
+    if (e) e.preventDefault()
     setSummarizing(true)
     setError('')
     setSummary('')
     setVideoMeta(null)
+    setShowManualInput(false)
 
     try {
+      // If transcript is provided manually, skip all fetching
+      if (providedTranscript) {
+        const res = await fetch('/api/summarize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, transcript: providedTranscript }),
+        })
+        const data = await res.json()
+        if (data.videoMeta) setVideoMeta(data.videoMeta)
+        if (res.ok) {
+          setSummary(data.summary)
+          const newItem: HistoryItem = {
+            id: Date.now().toString(), url, summary: data.summary, videoMeta: data.videoMeta,
+            date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
+          }
+          saveHistory([newItem, ...history])
+        } else {
+          setError(data.error || 'Summary failed.')
+        }
+        return
+      }
+
       // Attempt 1: Normal server-side fetch
       let res = await fetch('/api/summarize', {
         method: 'POST',
@@ -174,14 +185,14 @@ export default function SummarizerPage() {
       
       let data = await res.json()
 
-      // Attempt 2: If server is blocked (403 or specific error), try client-side fetch + CORS proxy
-      if (!res.ok && (res.status === 403 || data.error?.includes('BLOCKING'))) {
+      // Attempt 2: If server is blocked, try client-side fetch + Google proxy
+      if (!res.ok && (res.status === 403 || res.status === 400 || data.error?.includes('BLOCKING'))) {
         const videoId = extractVideoId(url)
         if (videoId) {
-          console.log('Server blocked (Round 3). Trying client-side fallback with multi-proxy...')
+          console.log('[Summarizer] Server blocked. Trying Google Gadget Proxy fallback...')
           const clientTranscript = await fetchTranscriptClientSide(videoId)
           if (clientTranscript) {
-            console.log('Client-side transcript fetched successfully! Sending back for AI summary...')
+            console.log('[Summarizer] Client-side transcript fetched! Summarizing...')
             res = await fetch('/api/summarize', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -194,7 +205,9 @@ export default function SummarizerPage() {
 
       if (data.videoMeta) setVideoMeta(data.videoMeta)
       if (!res.ok) {
-        setError(data.error || 'The video transcript could not be reached. Many creators disable captions for international IPs, and search engines are blocking automated access. Please try a different video or check if captions are enabled on YouTube.')
+        setError(data.error || 'YouTube is blocking our automatic access.')
+        // Show manual input option if all auto-methods fail
+        setShowManualInput(true)
       } else {
         setSummary(data.summary)
         const newItem: HistoryItem = {
@@ -276,10 +289,43 @@ export default function SummarizerPage() {
         </form>
       </div>
 
-      {/* Error */}
+      {/* Error & Manual Input Fallback */}
       {error && (
-        <div className="mt-5 p-4 bg-red-950/50 border border-red-900 text-red-400 text-sm rounded-2xl flex items-start gap-3">
-          <span className="text-lg leading-none">⚠</span><span>{error}</span>
+        <div className="mt-5 space-y-4">
+          <div className="p-4 bg-red-950/50 border border-red-900 text-red-400 text-sm rounded-2xl flex items-start gap-3">
+            <span className="text-lg leading-none">⚠</span>
+            <div className="flex-1">
+              <p className="font-semibold">{error}</p>
+              <p className="mt-1 opacity-70">YouTube's security is blocking our server. We are attempting to bypass it using your browser's connection.</p>
+            </div>
+          </div>
+
+          {showManualInput && (
+            <div className="bg-slate-900/80 border border-slate-700/50 rounded-2xl p-5 shadow-2xl animate-in fade-in slide-in-from-top-4 duration-500">
+              <div className="flex items-center gap-2 mb-3">
+                <FileText className="w-5 h-5 text-blue-400" />
+                <h3 className="font-bold text-slate-200">Manual Transcript Fallback</h3>
+              </div>
+              <p className="text-xs text-slate-400 mb-4 leading-relaxed">
+                If the automated bypass failed, you can manually paste the transcript here. 
+                (On YouTube: Click {"'Show Transcript'"} &rarr; Copy all text &rarr; Paste below)
+              </p>
+              <textarea
+                value={manualTranscript}
+                onChange={(e) => setManualTranscript(e.target.value)}
+                placeholder="Paste transcript here..."
+                className="w-full h-32 bg-slate-950/50 border border-slate-700 rounded-xl p-3 text-sm focus:ring-2 focus:ring-blue-500/50 outline-none transition-all resize-none text-slate-300"
+              />
+              <button
+                onClick={() => handleSummarize(undefined, manualTranscript)}
+                disabled={summarizing || !manualTranscript.trim()}
+                className="mt-3 w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:hover:bg-blue-600 text-white rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-blue-900/20"
+              >
+                {summarizing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                Summarize Manually
+              </button>
+            </div>
+          )}
         </div>
       )}
 
