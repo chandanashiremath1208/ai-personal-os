@@ -75,57 +75,90 @@ export async function POST(req: Request) {
     let transcriptText = '';
     let transcriptError = null;
 
-    // --- ROBUST TRANSCRIPT FETCHING LOGIC ---
+    // --- ADVANCED TRANSCRIPT FETCHING LOGIC (ROUND 2) ---
     try {
-      // Method 1: Try the library first (it might still work on some Vercel regions)
-      const items = await YoutubeTranscript.fetchTranscript(videoId);
-      transcriptText = items.map(i => i.text).join(' ');
-    } catch (e: any) {
-      console.warn(`Standard library failed for ${videoId}, trying browser-mimic fallback...`);
-      
-      try {
-        // Method 2: Manual scraping mimic (mimics a real browser request)
-        const response = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-          }
-        });
-        
-        const html = await response.text();
-        
-        // Search for the caption tracks in the page's initial data
-        const playerResponseMatch = html.match(/ytInitialPlayerResponse\s*=\s*({.+?});/);
-        if (playerResponseMatch) {
-          const playerResponse = JSON.parse(playerResponseMatch[1]);
-          const tracks = playerResponse.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-          
-          if (tracks && tracks.length > 0) {
-            // Prefer English or the first one available
-            const track = tracks.find((t: any) => t.languageCode === 'en') || tracks[0];
-            const transcriptResponse = await fetch(track.baseUrl);
-            const transcriptXml = await transcriptResponse.text();
-            
-            // Simple regex to extract text from <text> tags in the XML
-            const textMatches = transcriptXml.matchAll(/<text.+?>(.+?)<\/text>/g);
-            const lines = [];
-            for (const match of textMatches) {
-              // Decode basic entities
-              lines.push(match[1]
-                .replace(/&amp;/g, '&')
-                .replace(/&lt;/g, '<')
-                .replace(/&gt;/g, '>')
-                .replace(/&#39;/g, "'")
-                .replace(/&quot;/g, '"')
-              );
-            }
-            transcriptText = lines.join(' ');
-          }
+      // Method 1: Mimic a very specific modern browser session
+      const userAgents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+      ];
+      const selectedUA = userAgents[Math.floor(Math.random() * userAgents.length)];
+
+      const response = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+        headers: {
+          'User-Agent': selectedUA,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Sec-Ch-Ua': '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
+          'Sec-Ch-Ua-Mobile': '?0',
+          'Sec-Ch-Ua-Platform': '"Windows"',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Sec-Fetch-User': '?1',
+          'Upgrade-Insecure-Requests': '1',
+          'Cache-Control': 'max-age=0',
         }
-      } catch (fallbackError: any) {
-        transcriptError = fallbackError.message;
-        console.error('All transcript fetch methods failed:', transcriptError);
+      });
+      
+      const html = await response.text();
+      
+      // Look for the caption tracks in BOTH ytInitialPlayerResponse and ytInitialData
+      const playerResponseMatch = html.match(/ytInitialPlayerResponse\s*=\s*({.+?});/);
+      const initialDataMatch = html.match(/ytInitialData\s*=\s*({.+?});/);
+      
+      let playerResponse = null;
+      if (playerResponseMatch) {
+        playerResponse = JSON.parse(playerResponseMatch[1]);
+      } else if (initialDataMatch) {
+        // Fallback to initialData if playerResponse is missing
+        const initialData = JSON.parse(initialDataMatch[1]);
+        // Nested path in initialData is often different
+        playerResponse = initialData.playerResponse;
       }
+
+      if (playerResponse) {
+        const tracks = playerResponse.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+        
+        if (tracks && tracks.length > 0) {
+          // Priority: English -> English (auto) -> First available
+          const track = tracks.find((t: any) => t.languageCode === 'en' && !t.kind) || 
+                        tracks.find((t: any) => t.languageCode === 'en') || 
+                        tracks[0];
+          
+          const transcriptResponse = await fetch(track.baseUrl, {
+            headers: { 'User-Agent': selectedUA }
+          });
+          const transcriptXml = await transcriptResponse.text();
+          
+          // Improved XML parser for text content
+          const textMatches = transcriptXml.matchAll(/<text[^>]*>([^<]*)<\/text>/g);
+          const lines = [];
+          for (const match of textMatches) {
+            lines.push(match[1]
+              .replace(/&amp;/g, '&')
+              .replace(/&lt;/g, '<')
+              .replace(/&gt;/g, '>')
+              .replace(/&#39;/g, "'")
+              .replace(/&quot;/g, '"')
+              .replace(/\n/g, ' ')
+            );
+          }
+          transcriptText = lines.join(' ').replace(/\s+/g, ' ').trim();
+        }
+      }
+
+      // Final fallback: Use the library if manual scraping failed
+      if (!transcriptText || transcriptText.length === 0) {
+        console.warn('Manual scraping failed, falling back to library as last resort...');
+        const items = await YoutubeTranscript.fetchTranscript(videoId);
+        transcriptText = items.map(i => i.text).join(' ');
+      }
+
+    } catch (e: any) {
+      transcriptError = e.message;
+      console.error('All transcript fetch methods failed:', transcriptError);
     }
 
     if (!transcriptText || transcriptText.trim().length === 0) {
