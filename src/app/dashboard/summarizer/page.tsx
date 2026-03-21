@@ -69,50 +69,63 @@ export default function SummarizerPage() {
   }
 
   const fetchTranscriptClientSide = async (videoId: string) => {
-    try {
-      // Step 1: Fetch the YouTube page via CORS proxy
-      const pageUrl = encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)
-      const proxyUrl = `https://api.allorigins.win/get?url=${pageUrl}`
-      const response = await fetch(proxyUrl)
-      const data = await response.json()
-      const html = data.contents
+    // Try multiple CORS proxies for maximum reliability
+    const proxies = [
+      (url: string) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
+      (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`
+    ]
 
-      // Step 2: Extract caption tracks
-      const playerResponseMatch = html.match(/ytInitialPlayerResponse\s*=\s*({.+?});/)
-      if (!playerResponseMatch) return null
+    for (const getProxyUrl of proxies) {
+      try {
+        console.log(`Trying proxy: ${getProxyUrl('https://www.youtube.com/watch?v=' + videoId)}`)
+        const response = await fetch(getProxyUrl(`https://www.youtube.com/watch?v=${videoId}`))
+        const data = await response.json()
+        const html = data.contents || data
 
-      const playerResponse = JSON.parse(playerResponseMatch[1])
-      const tracks = playerResponse.captions?.playerCaptionsTracklistRenderer?.captionTracks
-      if (!tracks || tracks.length === 0) return null
+        if (!html || typeof html !== 'string') continue
 
-      // Step 3: Fetch the transcript XML via CORS proxy
-      const track = tracks.find((t: any) => t.languageCode === 'en' && !t.kind) || 
-                    tracks.find((t: any) => t.languageCode === 'en') || 
-                    tracks[0]
-      
-      const transcriptProxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(track.baseUrl)}`
-      const transcriptRes = await fetch(transcriptProxyUrl)
-      const transcriptData = await transcriptRes.json()
-      const transcriptXml = transcriptData.contents
+        // Comprehensive search for player response - using safer regex without /s if possible, or handling newlines
+        const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*({[\s\S]+?})\s*[;|<]/)
+        const dataMatch = html.match(/ytInitialData\s*=\s*({[\s\S]+?})\s*[;|<]/)
+        
+        let playerResponse = null
+        try {
+          if (playerMatch) playerResponse = JSON.parse(playerMatch[1])
+          else if (dataMatch) playerResponse = JSON.parse(dataMatch[1]).playerResponse
+        } catch (e) { continue }
 
-      // Step 4: Parse XML
-      const textMatches = transcriptXml.matchAll(/<text[^>]*>([^<]*)<\/text>/g)
-      const lines = []
-      for (const match of textMatches) {
-        lines.push(match[1]
-          .replace(/&amp;/g, '&')
-          .replace(/&lt;/g, '<')
-          .replace(/&gt;/g, '>')
-          .replace(/&#39;/g, "'")
-          .replace(/&quot;/g, '"')
-          .replace(/\n/g, ' ')
-        )
+        if (playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks) {
+          const tracks = playerResponse.captions.playerCaptionsTracklistRenderer.captionTracks
+          const track = tracks.find((t: any) => t.languageCode === 'en' && !t.kind) || 
+                        tracks.find((t: any) => t.languageCode === 'en') || 
+                        tracks[0]
+          
+          const transcriptRes = await fetch(getProxyUrl(track.baseUrl))
+          const transcriptData = await transcriptRes.json()
+          const transcriptXml = transcriptData.contents || transcriptData
+
+          if (!transcriptXml || typeof transcriptXml !== 'string') continue
+
+          const textMatches = transcriptXml.matchAll(/<text[^>]*>([^<]*)<\/text>/g)
+          const lines = []
+          for (const match of textMatches) {
+            lines.push(match[1]
+              .replace(/&amp;/g, '&')
+              .replace(/&lt;/g, '<')
+              .replace(/&gt;/g, '>')
+              .replace(/&#39;/g, "'")
+              .replace(/&quot;/g, '"')
+              .replace(/\n/g, ' ')
+            )
+          }
+          const text = lines.join(' ').replace(/\s+/g, ' ').trim()
+          if (text) return text
+        }
+      } catch (e) {
+        console.warn('Proxy attempt failed, trying next...', e)
       }
-      return lines.join(' ').replace(/\s+/g, ' ').trim()
-    } catch (e) {
-      console.error('Client-side transcript fetch failed:', e)
-      return null
     }
+    return null
   }
 
   const handleSummarize = async (e: React.FormEvent) => {
@@ -132,14 +145,14 @@ export default function SummarizerPage() {
       
       let data = await res.json()
 
-      // Attempt 2: If server is blocked, try client-side fetch + CORS proxy
-      if (!res.ok && data.error?.includes('blocking')) {
+      // Attempt 2: If server is blocked (403 or specific error), try client-side fetch + CORS proxy
+      if (!res.ok && (res.status === 403 || data.error?.includes('BLOCKING'))) {
         const videoId = extractVideoId(url)
         if (videoId) {
-          console.log('Server blocked. Trying client-side fallback...')
+          console.log('Server blocked (Round 3). Trying client-side fallback with multi-proxy...')
           const clientTranscript = await fetchTranscriptClientSide(videoId)
           if (clientTranscript) {
-            console.log('Client-side transcript fetched! Re-summarizing...')
+            console.log('Client-side transcript fetched successfully! Sending back for AI summary...')
             res = await fetch('/api/summarize', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -152,7 +165,7 @@ export default function SummarizerPage() {
 
       if (data.videoMeta) setVideoMeta(data.videoMeta)
       if (!res.ok) {
-        setError(data.error || 'Something went wrong.')
+        setError(data.error || 'The video transcript could not be reached. Many creators disable captions for international IPs, and search engines are blocking automated access. Please try a different video or check if captions are enabled on YouTube.')
       } else {
         setSummary(data.summary)
         const newItem: HistoryItem = {

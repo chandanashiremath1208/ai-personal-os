@@ -75,100 +75,64 @@ export async function POST(req: Request) {
     let transcriptText = providedTranscript || '';
     let transcriptError = null;
 
+    // --- ULTRA-ROBUST TRANSCRIPT FETCHING (ROUND 3) ---
     if (!transcriptText) {
-      // --- ADVANCED TRANSCRIPT FETCHING LOGIC (ROUND 2) ---
       try {
-        // ... existing logic ...
-      // Method 1: Mimic a very specific modern browser session
-      const userAgents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
-      ];
-      const selectedUA = userAgents[Math.floor(Math.random() * userAgents.length)];
+        const selectedUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
 
-      const response = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
-        headers: {
-          'User-Agent': selectedUA,
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Sec-Ch-Ua': '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
-          'Sec-Ch-Ua-Mobile': '?0',
-          'Sec-Ch-Ua-Platform': '"Windows"',
-          'Sec-Fetch-Dest': 'document',
-          'Sec-Fetch-Mode': 'navigate',
-          'Sec-Fetch-Site': 'none',
-          'Sec-Fetch-User': '?1',
-          'Upgrade-Insecure-Requests': '1',
-          'Cache-Control': 'max-age=0',
-        }
-      });
-      
-      const html = await response.text();
-      
-      // Look for the caption tracks in BOTH ytInitialPlayerResponse and ytInitialData
-      const playerResponseMatch = html.match(/ytInitialPlayerResponse\s*=\s*({.+?});/);
-      const initialDataMatch = html.match(/ytInitialData\s*=\s*({.+?});/);
-      
-      let playerResponse = null;
-      if (playerResponseMatch) {
-        playerResponse = JSON.parse(playerResponseMatch[1]);
-      } else if (initialDataMatch) {
-        // Fallback to initialData if playerResponse is missing
-        const initialData = JSON.parse(initialDataMatch[1]);
-        // Nested path in initialData is often different
-        playerResponse = initialData.playerResponse;
-      }
-
-      if (playerResponse) {
-        const tracks = playerResponse.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+        const response = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+          headers: {
+            'User-Agent': selectedUA,
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Cache-Control': 'no-cache',
+          }
+        });
         
-        if (tracks && tracks.length > 0) {
-          // Priority: English -> English (auto) -> First available
+        const html = await response.text();
+        
+        // Comprehensive regex to find the player response
+        const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*({[\s\S]+?})\s*(?:;|\n|<\/script)/);
+        const dataMatch = html.match(/ytInitialData\s*=\s*({[\s\S]+?})\s*(?:;|\n|<\/script)/);
+        
+        let playerResponse = null;
+        try {
+          if (playerMatch) playerResponse = JSON.parse(playerMatch[1]);
+          else if (dataMatch) playerResponse = JSON.parse(dataMatch[1]).playerResponse;
+        } catch (e) {
+          console.error("JSON parse failed for playerResponse");
+        }
+
+        if (playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks) {
+          const tracks = playerResponse.captions.playerCaptionsTracklistRenderer.captionTracks;
           const track = tracks.find((t: any) => t.languageCode === 'en' && !t.kind) || 
                         tracks.find((t: any) => t.languageCode === 'en') || 
                         tracks[0];
           
-          const transcriptResponse = await fetch(track.baseUrl, {
-            headers: { 'User-Agent': selectedUA }
-          });
-          const transcriptXml = await transcriptResponse.text();
-          
-          // Improved XML parser for text content
+          const transcriptRes = await fetch(track.baseUrl);
+          const transcriptXml = await transcriptRes.text();
           const textMatches = transcriptXml.matchAll(/<text[^>]*>([^<]*)<\/text>/g);
           const lines = [];
           for (const match of textMatches) {
-            lines.push(match[1]
-              .replace(/&amp;/g, '&')
-              .replace(/&lt;/g, '<')
-              .replace(/&gt;/g, '>')
-              .replace(/&#39;/g, "'")
-              .replace(/&quot;/g, '"')
-              .replace(/\n/g, ' ')
-            );
+            lines.push(match[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&quot;/g, '"'));
           }
-          transcriptText = lines.join(' ').replace(/\s+/g, ' ').trim();
+          transcriptText = lines.join(' ').trim();
         }
-      }
 
-      // Final fallback: Use the library if manual scraping failed
-      if (!transcriptText || transcriptText.length === 0) {
-        console.warn('Manual scraping failed, falling back to library as last resort...');
-        const items = await YoutubeTranscript.fetchTranscript(videoId);
-        transcriptText = items.map(i => i.text).join(' ');
+        if (!transcriptText) {
+          // Final server-side attempt: library
+          const items = await YoutubeTranscript.fetchTranscript(videoId).catch(() => []);
+          transcriptText = items.map(i => i.text).join(' ');
+        }
+      } catch (e: any) {
+        transcriptError = e.message;
       }
-
-    } catch (e: any) {
-      transcriptError = e.message;
-      console.error('All transcript fetch methods failed:', transcriptError);
     }
-    } // This closes the 'if (!transcriptText)' block
 
     if (!transcriptText || transcriptText.trim().length === 0) {
       return NextResponse.json({
-        error: `Could not fetch transcript. This video might not have captions enabled or YouTube is blocking our server. Please try a different video or try again later.`,
+        error: `UNABLE_TO_FETCH_TRANSCRIPT_BLOCKING: YouTube is heavily blocking our server IP. Falling back to browser-side fetch...`,
         videoMeta,
-      }, { status: 400 });
+      }, { status: 403 });
     }
 
     // Combine transcript text (already combined in the logic above)
