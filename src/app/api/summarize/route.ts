@@ -72,42 +72,72 @@ export async function POST(req: Request) {
     const metadata = await getVideoMetadata(videoId);
     const videoMeta = metadata;
 
-    let transcriptItems = null;
+    let transcriptText = '';
     let transcriptError = null;
 
+    // --- ROBUST TRANSCRIPT FETCHING LOGIC ---
     try {
-      // Attempt 1: Default language
-      transcriptItems = await YoutubeTranscript.fetchTranscript(videoId);
+      // Method 1: Try the library first (it might still work on some Vercel regions)
+      const items = await YoutubeTranscript.fetchTranscript(videoId);
+      transcriptText = items.map(i => i.text).join(' ');
     } catch (e: any) {
-      console.warn(`Default transcript fetch failed for ${videoId}:`, e.message);
+      console.warn(`Standard library failed for ${videoId}, trying browser-mimic fallback...`);
       
       try {
-        // Attempt 2: Try English explicitly
-        transcriptItems = await YoutubeTranscript.fetchTranscript(videoId, { lang: 'en' });
-      } catch (e2: any) {
-        try {
-          // Attempt 3: Try Hindi explicitly (common for user's context)
-          transcriptItems = await YoutubeTranscript.fetchTranscript(videoId, { lang: 'hi' });
-        } catch (e3: any) {
-          transcriptError = e3.message;
-          console.error(`All transcript attempts failed for ${videoId}:`, e3.message);
+        // Method 2: Manual scraping mimic (mimics a real browser request)
+        const response = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+          }
+        });
+        
+        const html = await response.text();
+        
+        // Search for the caption tracks in the page's initial data
+        const playerResponseMatch = html.match(/ytInitialPlayerResponse\s*=\s*({.+?});/);
+        if (playerResponseMatch) {
+          const playerResponse = JSON.parse(playerResponseMatch[1]);
+          const tracks = playerResponse.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+          
+          if (tracks && tracks.length > 0) {
+            // Prefer English or the first one available
+            const track = tracks.find((t: any) => t.languageCode === 'en') || tracks[0];
+            const transcriptResponse = await fetch(track.baseUrl);
+            const transcriptXml = await transcriptResponse.text();
+            
+            // Simple regex to extract text from <text> tags in the XML
+            const textMatches = transcriptXml.matchAll(/<text.+?>(.+?)<\/text>/g);
+            const lines = [];
+            for (const match of textMatches) {
+              // Decode basic entities
+              lines.push(match[1]
+                .replace(/&amp;/g, '&')
+                .replace(/&lt;/g, '<')
+                .replace(/&gt;/g, '>')
+                .replace(/&#39;/g, "'")
+                .replace(/&quot;/g, '"')
+              );
+            }
+            transcriptText = lines.join(' ');
+          }
         }
+      } catch (fallbackError: any) {
+        transcriptError = fallbackError.message;
+        console.error('All transcript fetch methods failed:', transcriptError);
       }
     }
 
-    if (!transcriptItems || transcriptItems.length === 0) {
+    if (!transcriptText || transcriptText.trim().length === 0) {
       return NextResponse.json({
-        error: `Could not fetch transcript: ${transcriptError || 'No captions found'}. This video might not have subtitles enabled or YouTube is blocking the request.`,
+        error: `Could not fetch transcript. This video might not have captions enabled or YouTube is blocking our server. Please try a different video or try again later.`,
         videoMeta,
       }, { status: 400 });
     }
 
-    if (!transcriptItems || transcriptItems.length === 0) {
-      return NextResponse.json({ error: 'No transcript available for this video.', videoMeta }, { status: 400 });
-    }
+    // Combine transcript text (already combined in the logic above)
+    const fullTranscript = transcriptText;
 
-    // Combine transcript text
-    const fullTranscript = transcriptItems.map((item: any) => item.text).join(' ');
 
     // Truncate transcript if it's too long
     const maxChars = 25000;
