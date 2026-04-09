@@ -37,20 +37,27 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   useEffect(() => {
     const getUser = async () => {
-      const supabase = createClient()
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) {
+      try {
+        const supabase = createClient()
+        const { data: { user }, error } = await supabase.auth.getUser()
+        
+        if (error || !user) {
+          router.push('/login')
+          return
+        }
+        
+        setUser(user)
+
+        // Check if user is admin (based on email or metadata)
+        const adminEmails = ['chandanashiremath@gmail.com'] // Add your admin emails here
+        const userIsAdmin = adminEmails.includes(user.email || '') || user.user_metadata?.role === 'admin'
+        setIsAdmin(userIsAdmin)
+      } catch (err) {
+        console.error('Failed to get user (Supabase project might be paused):', err)
         router.push('/login')
-        return
+      } finally {
+        setLoading(false)
       }
-      setUser(user)
-
-      // Check if user is admin (based on email or metadata)
-      const adminEmails = ['chandanashiremath@gmail.com'] // Add your admin emails here
-      const userIsAdmin = adminEmails.includes(user.email || '') || user.user_metadata?.role === 'admin'
-      setIsAdmin(userIsAdmin)
-
-      setLoading(false)
     }
     getUser()
 

@@ -16,11 +16,16 @@ export default function LandingPage() {
 
   useEffect(() => {
     const checkUser = async () => {
-      const supabase = createClient()
-      const { data: { user } } = await supabase.auth.getUser()
-      if (user) {
-        router.push('/dashboard')
-      } else {
+      try {
+        const supabase = createClient()
+        const { data: { user }, error } = await supabase.auth.getUser()
+        if (user && !error) {
+          router.push('/dashboard')
+        } else {
+          setLoading(false)
+        }
+      } catch (error) {
+        console.error('Supabase auth error (project might be paused):', error)
         setLoading(false)
       }
     }
