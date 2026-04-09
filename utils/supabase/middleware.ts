@@ -30,9 +30,18 @@ export async function updateSession(request: NextRequest) {
     }
   )
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  let user = null
+  try {
+    const authPromise = supabase.auth.getUser()
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Supabase Auth timeout')), 3000)
+    )
+    const result = await Promise.race([authPromise, timeoutPromise]) as any
+    user = result?.data?.user || null
+  } catch (error) {
+    console.error('Middleware: Supabase is paused or timed out.', error)
+    user = null
+  }
 
   const isAuthRoute = request.nextUrl.pathname.startsWith('/login')
   const isApiRoute = request.nextUrl.pathname.startsWith('/api') || request.nextUrl.pathname.startsWith('/auth')
